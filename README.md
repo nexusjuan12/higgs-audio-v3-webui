@@ -73,6 +73,8 @@ Voice clone:
 
 If `--ref-text` is omitted, the runner uses a `.txt` file beside the reference audio when one exists.
 
+Reference audio is downmixed to mono automatically before encoding. This keeps stereo uploads and stereo voice prompt files compatible with the Higgs audio tokenizer.
+
 ## Environment Overrides
 
 All scripts accept these environment overrides:

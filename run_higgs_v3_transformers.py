@@ -46,6 +46,15 @@ def select_dtype(name: str, device: str) -> torch.dtype:
     raise ValueError(f"Unsupported dtype: {name}")
 
 
+def load_reference_audio(path: str) -> tuple[torch.Tensor, int]:
+    waveform, sample_rate = torchaudio.load(path)
+    if waveform.ndim == 1:
+        waveform = waveform.unsqueeze(0)
+    if waveform.shape[0] > 1:
+        waveform = waveform.mean(dim=0, keepdim=True)
+    return waveform.contiguous(), sample_rate
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-path", default=DEFAULT_MODEL_PATH)
@@ -93,7 +102,7 @@ def main() -> None:
     reference_sample_rate = None
     reference_text = read_reference_text(args.ref_audio, args.ref_text, args.ref_text_file)
     if args.ref_audio:
-        reference_audio, reference_sample_rate = torchaudio.load(args.ref_audio)
+        reference_audio, reference_sample_rate = load_reference_audio(args.ref_audio)
         if reference_text is None:
             print(
                 "No reference transcript supplied or found beside --ref-audio; "

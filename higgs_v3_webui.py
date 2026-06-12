@@ -91,6 +91,15 @@ def coerce_optional_int(value: float | int | None) -> int | None:
     return None if value <= 0 else value
 
 
+def load_reference_audio(path: str) -> tuple[torch.Tensor, int]:
+    waveform, sample_rate = torchaudio.load(path)
+    if waveform.ndim == 1:
+        waveform = waveform.unsqueeze(0)
+    if waveform.shape[0] > 1:
+        waveform = waveform.mean(dim=0, keepdim=True)
+    return waveform.contiguous(), sample_rate
+
+
 def generate_audio(
     text: str,
     voice_label: str,
@@ -114,7 +123,7 @@ def generate_audio(
     reference_sample_rate = None
     prompt_audio = prompt_audio or None
     if prompt_audio:
-        reference_audio, reference_sample_rate = torchaudio.load(prompt_audio)
+        reference_audio, reference_sample_rate = load_reference_audio(prompt_audio)
 
     if seed >= 0:
         torch.manual_seed(seed)
