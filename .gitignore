@@ -1,0 +1,17 @@
+.env
+__pycache__/
+*.py[cod]
+*.log
+*.pid
+.venv/
+env/
+outputs/
+voice_prompts/
+models/
+*.wav
+*.mp3
+*.flac
+*.safetensors
+*.ckpt
+*.pt
+*.pth
