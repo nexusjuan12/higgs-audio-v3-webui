@@ -12,7 +12,9 @@ import torchaudio
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
-DEFAULT_MODEL_PATH = "/root/models/higgs-audio-v3-tts-4b-transformers"
+APP_DIR = Path(__file__).resolve().parent
+DEFAULT_MODEL_PATH = str(APP_DIR / "models" / "higgs-audio-v3-tts-4b-transformers")
+DEFAULT_OUTPUT_PATH = str(APP_DIR / "outputs" / "higgs-audio-v3-output.wav")
 
 
 def read_reference_text(
@@ -36,7 +38,9 @@ def read_reference_text(
 
 def select_dtype(name: str, device: str) -> torch.dtype:
     if name == "auto":
-        return torch.bfloat16 if device != "cpu" else torch.float32
+        if device == "cpu":
+            return torch.float32
+        return torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
     if name == "bfloat16":
         return torch.bfloat16
     if name == "float16":
@@ -59,7 +63,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-path", default=DEFAULT_MODEL_PATH)
     parser.add_argument("--text", required=True)
-    parser.add_argument("--out", default="/root/higgs-audio-v3-output.wav")
+    parser.add_argument("--out", default=DEFAULT_OUTPUT_PATH)
     parser.add_argument("--ref-audio", default=None)
     parser.add_argument("--ref-text", default=None)
     parser.add_argument("--ref-text-file", default=None)

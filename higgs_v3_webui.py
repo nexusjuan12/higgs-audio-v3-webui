@@ -11,23 +11,31 @@ from pathlib import Path
 import gradio as gr
 import torch
 import torchaudio
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoModelForSpeechSeq2Seq, AutoProcessor, AutoTokenizer
 
 
-DEFAULT_MODEL_PATH = "/root/models/higgs-audio-v3-tts-4b-transformers"
-DEFAULT_VOICE_DIR = "/root/higgs-audio/examples/voice_prompts"
-DEFAULT_OUTPUT_DIR = "/root/higgs-audio-v3-webui/outputs"
+APP_DIR = Path(__file__).resolve().parent
+DEFAULT_MODEL_PATH = str(APP_DIR / "models" / "higgs-audio-v3-tts-4b-transformers")
+DEFAULT_ASR_MODEL_PATH = str(APP_DIR / "models" / "whisper-base")
+DEFAULT_VOICE_DIR = str(APP_DIR / "voice_prompts")
+DEFAULT_OUTPUT_DIR = str(APP_DIR / "outputs")
 
 
 MODEL = None
 TOKENIZER = None
+ASR_MODEL = None
+ASR_PROCESSOR = None
+ASR_DEVICE = None
 DEVICE = None
 SAMPLE_RATE = 24000
+ASR_SAMPLE_RATE = 16000
 
 
 def select_dtype(name: str, device: str) -> torch.dtype:
     if name == "auto":
-        return torch.bfloat16 if device != "cpu" else torch.float32
+        if device == "cpu":
+            return torch.float32
+        return torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
     if name == "bfloat16":
         return torch.bfloat16
     if name == "float16":
@@ -69,6 +77,22 @@ def load_model(model_path: str, device: str, dtype_name: str) -> None:
     SAMPLE_RATE = int(MODEL.config.sample_rate)
 
 
+def load_asr_model(model_path: str, device: str, dtype_name: str) -> None:
+    global ASR_MODEL, ASR_PROCESSOR, ASR_DEVICE
+
+    if ASR_MODEL is not None and ASR_PROCESSOR is not None and ASR_DEVICE == device:
+        return
+
+    ASR_DEVICE = device
+    dtype = torch.float32 if device == "cpu" else select_dtype(dtype_name, device)
+    ASR_PROCESSOR = AutoProcessor.from_pretrained(model_path, local_files_only=True)
+    ASR_MODEL = AutoModelForSpeechSeq2Seq.from_pretrained(
+        model_path,
+        local_files_only=True,
+        dtype=dtype,
+    ).to(device).eval()
+
+
 def selected_voice(
     voice_label: str,
     prompts: dict[str, tuple[str, str | None]],
@@ -98,6 +122,45 @@ def load_reference_audio(path: str) -> tuple[torch.Tensor, int]:
     if waveform.shape[0] > 1:
         waveform = waveform.mean(dim=0, keepdim=True)
     return waveform.contiguous(), sample_rate
+
+
+def transcribe_reference_audio(
+    prompt_audio: str | None,
+    asr_model_path: str,
+    asr_device: str,
+    asr_dtype: str,
+) -> tuple[str, str]:
+    if not prompt_audio:
+        return "", "Reference audio cleared."
+
+    try:
+        load_asr_model(asr_model_path, asr_device, asr_dtype)
+        waveform, sample_rate = load_reference_audio(prompt_audio)
+        if sample_rate != ASR_SAMPLE_RATE:
+            waveform = torchaudio.functional.resample(waveform, sample_rate, ASR_SAMPLE_RATE)
+
+        audio = waveform.squeeze(0).float().cpu().numpy()
+        inputs = ASR_PROCESSOR(
+            audio,
+            sampling_rate=ASR_SAMPLE_RATE,
+            return_tensors="pt",
+        )
+        input_features = inputs.input_features.to(asr_device)
+        if asr_device != "cpu":
+            input_features = input_features.to(next(ASR_MODEL.parameters()).dtype)
+
+        start = time.time()
+        with torch.inference_mode():
+            predicted_ids = ASR_MODEL.generate(input_features, max_new_tokens=128)
+        transcript = ASR_PROCESSOR.batch_decode(predicted_ids, skip_special_tokens=True)[0].strip()
+    except Exception as exc:
+        raise gr.Error(f"Reference transcription failed: {exc}") from exc
+
+    if not transcript:
+        raise gr.Error("Reference transcription returned empty text.")
+
+    elapsed = time.time() - start
+    return transcript, f"Transcribed reference audio | {elapsed:.2f}s"
 
 
 def generate_audio(
@@ -158,7 +221,13 @@ def generate_audio(
     return str(out_path), status
 
 
-def build_ui(prompts: dict[str, tuple[str, str | None]], output_dir: str) -> gr.Blocks:
+def build_ui(
+    prompts: dict[str, tuple[str, str | None]],
+    output_dir: str,
+    asr_model_path: str,
+    asr_device: str,
+    asr_dtype: str,
+) -> gr.Blocks:
     with gr.Blocks(title="Higgs Audio v3", fill_height=True) as demo:
         gr.Markdown("# Higgs Audio v3")
 
@@ -188,6 +257,7 @@ def build_ui(prompts: dict[str, tuple[str, str | None]], output_dir: str) -> gr.
                     sources=["upload"],
                 )
                 prompt_text = gr.Textbox(label="Reference transcript", lines=4)
+                transcribe = gr.Button("Transcribe Reference")
 
                 with gr.Accordion("Generation", open=True):
                     max_new_tokens = gr.Slider(
@@ -225,6 +295,26 @@ def build_ui(prompts: dict[str, tuple[str, str | None]], output_dir: str) -> gr.
             inputs=[voice],
             outputs=[prompt_audio, prompt_text],
         )
+        prompt_audio.change(
+            fn=lambda audio: transcribe_reference_audio(
+                audio,
+                asr_model_path,
+                asr_device,
+                asr_dtype,
+            ),
+            inputs=[prompt_audio],
+            outputs=[prompt_text, status],
+        )
+        transcribe.click(
+            fn=lambda audio: transcribe_reference_audio(
+                audio,
+                asr_model_path,
+                asr_device,
+                asr_dtype,
+            ),
+            inputs=[prompt_audio],
+            outputs=[prompt_text, status],
+        )
         generate.click(
             fn=lambda *args: generate_audio(*args, output_dir),
             inputs=[
@@ -251,13 +341,20 @@ def build_ui(prompts: dict[str, tuple[str, str | None]], output_dir: str) -> gr.
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-path", default=DEFAULT_MODEL_PATH)
+    parser.add_argument("--asr-model-path", default=DEFAULT_ASR_MODEL_PATH)
     parser.add_argument("--voice-dir", default=DEFAULT_VOICE_DIR)
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--server-name", default="0.0.0.0")
     parser.add_argument("--server-port", type=int, default=7861)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--asr-device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument(
         "--dtype",
+        choices=("auto", "bfloat16", "float16", "float32"),
+        default="auto",
+    )
+    parser.add_argument(
+        "--asr-dtype",
         choices=("auto", "bfloat16", "float16", "float32"),
         default="auto",
     )
@@ -269,7 +366,7 @@ def main() -> None:
     args = parse_args()
     load_model(args.model_path, args.device, args.dtype)
     prompts = discover_voice_prompts(Path(args.voice_dir))
-    demo = build_ui(prompts, args.output_dir)
+    demo = build_ui(prompts, args.output_dir, args.asr_model_path, args.asr_device, args.asr_dtype)
     demo.queue(max_size=8, default_concurrency_limit=1).launch(
         server_name=args.server_name,
         server_port=args.server_port,
