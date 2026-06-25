@@ -14,7 +14,7 @@ fi
 
 while IFS= read -r pid; do
   pids+=("$pid")
-done < <(pgrep -f "$APP_DIR/[h]iggs_v3_webui.py" || true)
+done < <(pgrep -f "$APP_DIR/higgs_v3_webui.py" || true)
 
 mapfile -t pids < <(printf "%s\n" "${pids[@]}" | sort -u)
 

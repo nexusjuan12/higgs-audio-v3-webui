@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import re
+import shutil
 import time
 import uuid
 from pathlib import Path
@@ -56,6 +58,63 @@ def discover_voice_prompts(voice_dir: Path) -> dict[str, tuple[str, str | None]]
         transcript = text_path.read_text(encoding="utf-8").strip() if text_path.exists() else None
         prompts[label] = (str(wav), transcript)
     return prompts
+
+
+def voice_prompt_choices(prompts: dict[str, tuple[str, str | None]]) -> list[str]:
+    return list(prompts.keys())
+
+
+def safe_stem(name: str) -> str:
+    stem = re.sub(r"[^A-Za-z0-9._ -]+", "", name.strip())
+    stem = re.sub(r"\s+", "_", stem).strip("._- ")
+    if not stem:
+        raise gr.Error("Enter a voice prompt save name.")
+    return stem
+
+
+def save_voice_prompt(
+    prompt_audio: str | None,
+    prompt_text: str,
+    save_name: str,
+    voice_dir: str,
+    prompts: dict[str, tuple[str, str | None]],
+) -> str | None:
+    save_name = (save_name or "").strip()
+    if not save_name:
+        return None
+    if not prompt_audio:
+        raise gr.Error("Choose reference audio before saving a voice prompt.")
+
+    stem = safe_stem(save_name)
+    out_dir = Path(voice_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    audio_path = out_dir / f"{stem}.wav"
+    text_path = out_dir / f"{stem}.txt"
+
+    if Path(prompt_audio).resolve() != audio_path.resolve():
+        shutil.copy2(prompt_audio, audio_path)
+    text_path.write_text((prompt_text or "").strip() + "\n", encoding="utf-8")
+
+    label = audio_path.stem.replace("_", " ").title()
+    prompts[label] = (str(audio_path), (prompt_text or "").strip())
+    return label
+
+
+def output_history_choices(output_dir: str, limit: int = 100) -> list[tuple[str, str]]:
+    out_dir = Path(output_dir)
+    if not out_dir.exists():
+        return []
+
+    files = sorted(out_dir.glob("*.wav"), key=lambda path: path.stat().st_mtime, reverse=True)
+    choices = []
+    for wav in files[:limit]:
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(wav.stat().st_mtime))
+        choices.append((f"{timestamp}  {wav.name}", str(wav)))
+    return choices
+
+
+def selected_history_audio(path: str | None) -> str | None:
+    return path or None
 
 
 def load_model(model_path: str, device: str, dtype_name: str) -> None:
@@ -168,13 +227,16 @@ def generate_audio(
     voice_label: str,
     prompt_audio: str | None,
     prompt_text: str,
+    save_voice_name: str,
     max_new_tokens: int,
     temperature: float,
     top_p: float,
     top_k: int,
     seed: int,
     output_dir: str,
-) -> tuple[str, str]:
+    voice_dir: str,
+    prompts: dict[str, tuple[str, str | None]],
+) -> tuple[str, str, gr.Dropdown, gr.Dropdown, str]:
     if MODEL is None or TOKENIZER is None:
         raise gr.Error("Model is not loaded.")
 
@@ -217,12 +279,24 @@ def generate_audio(
     mode = "Voice clone" if prompt_audio else "TTS"
     if voice_label and voice_label != "None":
         mode = f"{mode} ({voice_label})"
+
+    saved_label = save_voice_prompt(prompt_audio, prompt_text, save_voice_name, voice_dir, prompts)
     status = f"{mode} | {duration:.2f}s audio | {elapsed:.2f}s generation | {out_path}"
-    return str(out_path), status
+    if saved_label:
+        status = f"{status} | saved voice prompt: {saved_label}"
+
+    return (
+        str(out_path),
+        status,
+        gr.Dropdown(choices=voice_prompt_choices(prompts), value=saved_label or voice_label),
+        gr.Dropdown(choices=output_history_choices(output_dir), value=str(out_path)),
+        str(out_path),
+    )
 
 
 def build_ui(
     prompts: dict[str, tuple[str, str | None]],
+    voice_dir: str,
     output_dir: str,
     asr_model_path: str,
     asr_device: str,
@@ -242,8 +316,22 @@ def build_ui(
                     generate = gr.Button("Generate", variant="primary")
                     clear = gr.Button("Clear")
 
-                output_audio = gr.Audio(label="Output", type="filepath")
+                output_audio = gr.Audio(label="Output", type="filepath", autoplay=True)
                 status = gr.Textbox(label="Status", lines=2, interactive=False)
+
+                with gr.Accordion("Output history", open=True):
+                    output_history = gr.Dropdown(
+                        choices=output_history_choices(output_dir),
+                        value=None,
+                        label="Generated files",
+                    )
+                    with gr.Row():
+                        refresh_history = gr.Button("Refresh History")
+                    history_audio = gr.Audio(
+                        label="Selected output",
+                        type="filepath",
+                        buttons=["download"],
+                    )
 
             with gr.Column(scale=4, min_width=360):
                 voice = gr.Dropdown(
@@ -257,6 +345,10 @@ def build_ui(
                     sources=["upload"],
                 )
                 prompt_text = gr.Textbox(label="Reference transcript", lines=4)
+                save_voice_name = gr.Textbox(
+                    label="Save voice prompt as",
+                    placeholder="Optional; saved when Generate succeeds",
+                )
                 transcribe = gr.Button("Transcribe Reference")
 
                 with gr.Accordion("Generation", open=True):
@@ -295,6 +387,15 @@ def build_ui(
             inputs=[voice],
             outputs=[prompt_audio, prompt_text],
         )
+        refresh_history.click(
+            fn=lambda: gr.Dropdown(choices=output_history_choices(output_dir), value=None),
+            outputs=[output_history],
+        )
+        output_history.change(
+            fn=selected_history_audio,
+            inputs=[output_history],
+            outputs=[history_audio],
+        )
         prompt_audio.change(
             fn=lambda audio: transcribe_reference_audio(
                 audio,
@@ -316,23 +417,24 @@ def build_ui(
             outputs=[prompt_text, status],
         )
         generate.click(
-            fn=lambda *args: generate_audio(*args, output_dir),
+            fn=lambda *args: generate_audio(*args, output_dir, voice_dir, prompts),
             inputs=[
                 text,
                 voice,
                 prompt_audio,
                 prompt_text,
+                save_voice_name,
                 max_new_tokens,
                 temperature,
                 top_p,
                 top_k,
                 seed,
             ],
-            outputs=[output_audio, status],
+            outputs=[output_audio, status, voice, output_history, history_audio],
         )
         clear.click(
-            fn=lambda: ("", None, "", None, ""),
-            outputs=[text, prompt_audio, prompt_text, output_audio, status],
+            fn=lambda: ("", None, "", "", None, ""),
+            outputs=[text, prompt_audio, prompt_text, save_voice_name, output_audio, status],
         )
 
     return demo
@@ -366,7 +468,14 @@ def main() -> None:
     args = parse_args()
     load_model(args.model_path, args.device, args.dtype)
     prompts = discover_voice_prompts(Path(args.voice_dir))
-    demo = build_ui(prompts, args.output_dir, args.asr_model_path, args.asr_device, args.asr_dtype)
+    demo = build_ui(
+        prompts,
+        args.voice_dir,
+        args.output_dir,
+        args.asr_model_path,
+        args.asr_device,
+        args.asr_dtype,
+    )
     demo.queue(max_size=8, default_concurrency_limit=1).launch(
         server_name=args.server_name,
         server_port=args.server_port,

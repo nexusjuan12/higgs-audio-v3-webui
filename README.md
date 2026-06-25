@@ -1,4 +1,4 @@
-# Higgs Audio v3 Web UI
+# Higgs Audio v3 Community Web UI
 
 Portable Gradio UI and command-line runner for the community Transformers port of Higgs Audio v3:
 
@@ -15,8 +15,8 @@ The install keeps the environment, models, outputs, logs, and PID file inside th
 Clone the repo, then run the installer for your GPU:
 
 ```bash
-git clone https://github.com/nexusjuan12/higgs-audio-v3-webui.git
-cd higgs-audio-v3-webui
+git clone https://github.com/nexusjuan12/higgs-audio-v3-community-webui.git
+cd higgs-audio-v3-community-webui
 
 # RTX 5090 / Blackwell
 ./install_5090.sh
@@ -68,6 +68,12 @@ This writes a short WAV to `outputs/verify-higgs-v3.wav` and prints the sample r
 ## Transcription
 
 The UI auto-fills `Reference transcript` when reference audio is uploaded or changed. Use the `Transcribe Reference` button to rerun transcription manually. Transcription uses the local `models/whisper-base/` model downloaded during install.
+
+## Voice Prompt Library
+
+Use `Save voice prompt as` to save the current reference audio and transcript as a reusable voice prompt. Saved prompts are stored as paired `.wav` and `.txt` files in `voice_prompts/`, and appear in the `Voice prompt` dropdown on the next refresh/start.
+
+Generated audio is written to `outputs/` and appears in `Output history` for playback or download.
 
 ## CLI
 
